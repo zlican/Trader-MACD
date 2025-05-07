@@ -17,20 +17,23 @@ import (
 )
 
 type CoinIndicator struct {
-	Symbol    string
-	Price     float64
-	MA25      float64
-	MACD      float64
-	Signal    float64
-	Histogram float64
-	PriceToMA float64 // 价格与MA25的距离百分比
+	Symbol       string
+	Price        float64
+	MA25         float64
+	MACD         float64
+	Signal       float64
+	Histogram    float64
+	PriceToMA    float64
+	TimeInternal string
 }
 
 var (
-	apiKey       = ""                       // 在此处填写您的 Binance API Key
-	secretKey    = ""                       // 在此处填写您的 Binance Secret Key
-	proxyURL     = "http://127.0.0.1:10809" // 如果需要使用代理，请在此处填写代理地址
-	timeInternal = "4h"
+	apiKey          = ""                       // 在此处填写您的 Binance API Key
+	secretKey       = ""                       // 在此处填写您的 Binance Secret Key
+	proxyURL        = "http://127.0.0.1:10809" // 如果需要使用代理，请在此处填写代理地址
+	timeInternal_1h = "1h"
+	timeInternal_4h = "4h"
+	klinesCount     = 200
 )
 
 func main() {
@@ -66,15 +69,27 @@ func main() {
 	)
 	for _, symbol := range symbols {
 		//对每一个代币的获取开启协程
-		wg.Add(1)
+		wg.Add(2)
 		go func(sym string) {
 			defer wg.Done()
-			result, ok := processSymbol(client, sym)
+			result_1h, ok := processSymbol(client, sym, timeInternal_1h)
 			if ok {
 				mu.Lock()
-				results = append(results, result)
+				results = append(results, result_1h)
 				mu.Unlock()
 			}
+
+		}(symbol)
+
+		go func(sym string) {
+			defer wg.Done()
+			result_4h, ok := processSymbol(client, sym, timeInternal_4h)
+			if ok {
+				mu.Lock()
+				results = append(results, result_4h)
+				mu.Unlock()
+			}
+
 		}(symbol)
 	}
 	wg.Wait()
@@ -85,20 +100,49 @@ func main() {
 	})
 
 	// 打印结果
-	fmt.Println("符合条件的币种列表:")
-	fmt.Println("Symbol\t\tPrice\t\tDEA位置\t\t两线距离\t\t相交趋势\t\tHistogram")
+	fmt.Println("")
+	fmt.Println("")
+	fmt.Println("		《1H———符合条件的币种列表》		")
+	fmt.Println("Symbol         Price        DEA位置      两线距离     相交趋势     Histogram")
 	fmt.Println("----------------------------------------------------------------------")
 	for _, result := range results {
+		if result.TimeInternal != "1h" {
+			continue
+		}
 		distancePercent := math.Abs(result.MACD-result.Signal) / math.Abs(result.Signal) * 100
-		fmt.Printf("%s\t%.8f\t%.8f\t%.2f%%\t\t%s\t%.8f\n",
-			result.Symbol, result.Price, result.Signal, distancePercent,
-			getConvergingStatus(result.MACD, result.Signal), result.Histogram)
+		fmt.Printf("%-14s %-12.8f %-12.8f %-10.2f %-10s %-12.8f\n",
+			result.Symbol,
+			result.Price,
+			result.Signal,
+			distancePercent,
+			getConvergingStatus(result.MACD, result.Signal),
+			result.Histogram,
+		)
+	}
+	fmt.Println("")
+	fmt.Println("")
+	fmt.Println("		《4H———符合条件的币种列表》		")
+	fmt.Println("Symbol         Price        DEA位置      两线距离     相交趋势     Histogram")
+	fmt.Println("----------------------------------------------------------------------")
+	for _, result := range results {
+		if result.TimeInternal != "4h" {
+			continue
+		}
+		distancePercent := math.Abs(result.MACD-result.Signal) / math.Abs(result.Signal) * 100
+		fmt.Printf("%-14s %-12.8f %-12.8f %-10.2f %-10s %-12.8f\n",
+			result.Symbol,
+			result.Price,
+			result.Signal,
+			distancePercent,
+			getConvergingStatus(result.MACD, result.Signal),
+			result.Histogram,
+		)
 	}
 }
 
 // 计算简单移动平均线
 func calculateMA(data []float64, period int) float64 {
-	if len(data) < period {
+	if len(data) < period || period <= 0 {
 		return 0
 	}
 
@@ -147,11 +191,11 @@ func getConvergingStatus(macd, signal float64) string {
 	}
 }
 
-func processSymbol(client *futures.Client, symbol string) (CoinIndicator, bool) {
+func processSymbol(client *futures.Client, symbol string, timeInternal string) (CoinIndicator, bool) {
 	klines, err := client.NewKlinesService().
 		Symbol(symbol).
 		Interval(timeInternal).
-		Limit(100).
+		Limit(klinesCount).
 		Do(context.Background())
 	if err != nil || len(klines) < 35 {
 		return CoinIndicator{}, false
@@ -168,8 +212,21 @@ func processSymbol(client *futures.Client, symbol string) (CoinIndicator, bool) 
 
 	currentPrice := closes[len(closes)-1]
 	ma25 := calculateMA(closes, 25)
+	ema144 := calculateEMA(closes, 144)
+	ema169 := calculateEMA(closes, 169)
 	macdLine, signalLine, histogram := calculateMACD(closes, 12, 26, 9)
-	priceToMA := math.Abs((currentPrice - ma25) / ma25 * 100)
+
+	//过滤条件
+	//只过滤出在EMA144和EMA169之上
+	if currentPrice < ema144[len(ema144)-1] || currentPrice < ema169[len(ema169)-1] {
+		return CoinIndicator{}, false
+	}
+
+	//只过滤在MA25之上
+	priceToMA := currentPrice - ma25
+	if priceToMA < 0 {
+		return CoinIndicator{}, false
+	}
 
 	//只过滤出红色柱子
 	currentHistogram := histogram[len(histogram)-1]
@@ -189,13 +246,14 @@ func processSymbol(client *futures.Client, symbol string) (CoinIndicator, bool) 
 
 	if deaAboveZero && (gettingCloser || entangled) && crossingTrend {
 		return CoinIndicator{
-			Symbol:    symbol,
-			Price:     currentPrice,
-			MA25:      ma25,
-			MACD:      macdLine[len(macdLine)-1],
-			Signal:    signalLine[len(signalLine)-1],
-			Histogram: histogram[len(histogram)-1],
-			PriceToMA: priceToMA,
+			Symbol:       symbol,
+			Price:        currentPrice,
+			MA25:         ma25,
+			MACD:         macdLine[len(macdLine)-1],
+			Signal:       signalLine[len(signalLine)-1],
+			Histogram:    histogram[len(histogram)-1],
+			PriceToMA:    priceToMA,
+			TimeInternal: timeInternal,
 		}, true
 	}
 	return CoinIndicator{}, false
