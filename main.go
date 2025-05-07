@@ -27,9 +27,10 @@ type CoinIndicator struct {
 }
 
 var (
-	apiKey    = ""                       // 在此处填写您的 Binance API Key
-	secretKey = ""                       // 在此处填写您的 Binance Secret Key
-	proxyURL  = "http://127.0.0.1:10809" // 如果需要使用代理，请在此处填写代理地址
+	apiKey       = ""                       // 在此处填写您的 Binance API Key
+	secretKey    = ""                       // 在此处填写您的 Binance Secret Key
+	proxyURL     = "http://127.0.0.1:10809" // 如果需要使用代理，请在此处填写代理地址
+	timeInternal = "4h"
 )
 
 func main() {
@@ -149,7 +150,7 @@ func getConvergingStatus(macd, signal float64) string {
 func processSymbol(client *futures.Client, symbol string) (CoinIndicator, bool) {
 	klines, err := client.NewKlinesService().
 		Symbol(symbol).
-		Interval("4h").
+		Interval(timeInternal).
 		Limit(100).
 		Do(context.Background())
 	if err != nil || len(klines) < 35 {
@@ -169,6 +170,12 @@ func processSymbol(client *futures.Client, symbol string) (CoinIndicator, bool) 
 	ma25 := calculateMA(closes, 25)
 	macdLine, signalLine, histogram := calculateMACD(closes, 12, 26, 9)
 	priceToMA := math.Abs((currentPrice - ma25) / ma25 * 100)
+
+	//只过滤出红色柱子
+	currentHistogram := histogram[len(histogram)-1]
+	if currentHistogram > 0 {
+		return CoinIndicator{}, false
+	}
 
 	deaAboveZero := signalLine[len(signalLine)-1] > 0
 	currentDistance := math.Abs(macdLine[len(macdLine)-1] - signalLine[len(signalLine)-1])
