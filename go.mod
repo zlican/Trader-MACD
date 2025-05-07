@@ -1,8 +1,13 @@
 module macd
 
-go 1.22.12
+go 1.23.0
 
-require github.com/adshao/go-binance/v2 v2.8.2
+toolchain go1.23.9
+
+require (
+	github.com/adshao/go-binance/v2 v2.8.2
+	golang.org/x/sync v0.14.0
+)
 
 require (
 	github.com/bitly/go-simplejson v0.5.0 // indirect

@@ -11,9 +11,11 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/adshao/go-binance/v2"
 	"github.com/adshao/go-binance/v2/futures"
+	"golang.org/x/sync/semaphore"
 )
 
 type CoinIndicator struct {
@@ -34,6 +36,7 @@ var (
 	timeInternal_1h = "1h"
 	timeInternal_4h = "4h"
 	klinesCount     = 200
+	goroutineCount  = 50
 )
 
 func main() {
@@ -67,11 +70,18 @@ func main() {
 		mu      sync.Mutex
 		wg      sync.WaitGroup
 	)
+	sem := semaphore.NewWeighted(int64(goroutineCount))
+	//api并发限流
 	for _, symbol := range symbols {
 		//对每一个代币的获取开启协程
 		wg.Add(2)
 		go func(sym string) {
 			defer wg.Done()
+			if err := sem.Acquire(context.Background(), 1); err != nil {
+				return
+			}
+			defer sem.Release(1)
+
 			result_1h, ok := processSymbol(client, sym, timeInternal_1h)
 			if ok {
 				mu.Lock()
@@ -83,6 +93,10 @@ func main() {
 
 		go func(sym string) {
 			defer wg.Done()
+			if err := sem.Acquire(context.Background(), 1); err != nil {
+				return
+			}
+			defer sem.Release(1)
 			result_4h, ok := processSymbol(client, sym, timeInternal_4h)
 			if ok {
 				mu.Lock()
@@ -192,11 +206,14 @@ func getConvergingStatus(macd, signal float64) string {
 }
 
 func processSymbol(client *futures.Client, symbol string, timeInternal string) (CoinIndicator, bool) {
+	//单个超时控制
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 	klines, err := client.NewKlinesService().
 		Symbol(symbol).
 		Interval(timeInternal).
 		Limit(klinesCount).
-		Do(context.Background())
+		Do(ctx)
 	if err != nil || len(klines) < 35 {
 		return CoinIndicator{}, false
 	}
