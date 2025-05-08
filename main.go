@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"macd/utils"
 	"math"
 	"net/http"
 	"net/url"
@@ -19,14 +20,15 @@ import (
 )
 
 type CoinIndicator struct {
-	Symbol       string
-	Price        float64
-	MA25         float64
-	MACD         float64
-	Signal       float64
-	Histogram    float64
-	PriceToMA    float64
-	TimeInternal string
+	Symbol       string  //代币名称
+	Price        float64 //代币价格
+	TimeInternal string  //代币时段
+	MA25         float64 //MA25
+	MACD         float64 //MACD
+	Signal       float64 //信号?
+	Histogram    float64 //MACD柱子
+	Volume24H    float64 // 24小时交易量
+	StopLossRate float64 // 止损百分比
 }
 
 var (
@@ -36,7 +38,13 @@ var (
 	timeInternal_1h = "1h"
 	timeInternal_4h = "4h"
 	klinesCount     = 200
-	goroutineCount  = 50
+	goroutineCount  = 80
+)
+
+var (
+	volumeMap    = make(map[string]float64)
+	MA25Map1h    = make(map[string]float64)
+	mu_MA25Map1h sync.Mutex
 )
 
 func main() {
@@ -65,6 +73,9 @@ func main() {
 		}
 	}
 
+	//获取所有币种的24小时交易额
+	utils.Get24HVolume(client, volumeMap)
+
 	var (
 		results []CoinIndicator
 		mu      sync.Mutex
@@ -72,9 +83,9 @@ func main() {
 	)
 	sem := semaphore.NewWeighted(int64(goroutineCount))
 	//api并发限流
+	// step1: 先处理所有 1h
 	for _, symbol := range symbols {
-		//对每一个代币的获取开启协程
-		wg.Add(2)
+		wg.Add(1)
 		go func(sym string) {
 			defer wg.Done()
 			if err := sem.Acquire(context.Background(), 1); err != nil {
@@ -88,110 +99,80 @@ func main() {
 				results = append(results, result_1h)
 				mu.Unlock()
 			}
-
 		}(symbol)
+	}
+	wg.Wait()
 
+	// step2: 再处理所有 4h
+	for _, symbol := range symbols {
+		wg.Add(1)
 		go func(sym string) {
 			defer wg.Done()
 			if err := sem.Acquire(context.Background(), 1); err != nil {
 				return
 			}
 			defer sem.Release(1)
+
 			result_4h, ok := processSymbol(client, sym, timeInternal_4h)
 			if ok {
 				mu.Lock()
 				results = append(results, result_4h)
 				mu.Unlock()
 			}
-
 		}(symbol)
 	}
 	wg.Wait()
 
-	// 按照与 MA25 的距离排序结果
+	// 按照交易量 排序结果
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].PriceToMA < results[j].PriceToMA
+		return results[i].Volume24H > results[j].Volume24H
 	})
 
 	// 打印结果
 	fmt.Println("")
 	fmt.Println("")
 	fmt.Println("		《1H———符合条件的币种列表》		")
-	fmt.Println("Symbol         Price        DEA位置      两线距离     相交趋势     Histogram")
+	fmt.Println("Symbol         Volume       相交趋势       止损")
 	fmt.Println("----------------------------------------------------------------------")
 	for _, result := range results {
 		if result.TimeInternal != "1h" {
 			continue
 		}
-		distancePercent := math.Abs(result.MACD-result.Signal) / math.Abs(result.Signal) * 100
-		fmt.Printf("%-14s %-12.8f %-12.8f %-10.2f %-10s %-12.8f\n",
+		var trend string
+		if result.Histogram > 0 {
+			trend = "水上金叉"
+		} else {
+			trend = getConvergingStatus(result.MACD, result.Signal)
+		}
+		fmt.Printf("%-14s %-12.0f %-10s %-12.2f\n",
 			result.Symbol,
-			result.Price,
-			result.Signal,
-			distancePercent,
-			getConvergingStatus(result.MACD, result.Signal),
-			result.Histogram,
+			result.Volume24H,
+			trend,
+			result.StopLossRate,
 		)
 	}
 	fmt.Println("")
 	fmt.Println("")
 	fmt.Println("		《4H———符合条件的币种列表》		")
-	fmt.Println("Symbol         Price        DEA位置      两线距离     相交趋势     Histogram")
+	fmt.Println("Symbol         Volume       相交趋势       止损")
 	fmt.Println("----------------------------------------------------------------------")
 	for _, result := range results {
 		if result.TimeInternal != "4h" {
 			continue
 		}
-		distancePercent := math.Abs(result.MACD-result.Signal) / math.Abs(result.Signal) * 100
-		fmt.Printf("%-14s %-12.8f %-12.8f %-10.2f %-10s %-12.8f\n",
+		var trend string
+		if result.Histogram > 0 {
+			trend = "水上金叉"
+		} else {
+			trend = getConvergingStatus(result.MACD, result.Signal)
+		}
+		fmt.Printf("%-14s %-12.0f %-10s %-12.2f\n",
 			result.Symbol,
-			result.Price,
-			result.Signal,
-			distancePercent,
-			getConvergingStatus(result.MACD, result.Signal),
-			result.Histogram,
+			result.Volume24H,
+			trend,
+			result.StopLossRate,
 		)
 	}
-}
-
-// 计算简单移动平均线
-func calculateMA(data []float64, period int) float64 {
-	if len(data) < period || period <= 0 {
-		return 0
-	}
-
-	sum := 0.0
-	for i := len(data) - period; i < len(data); i++ {
-		sum += data[i]
-	}
-	return sum / float64(period)
-}
-
-// 计算指数移动平均线
-func calculateEMA(data []float64, period int) []float64 {
-	ema := make([]float64, len(data))
-	multiplier := 2.0 / float64(period+1)
-	ema[0] = data[0]
-	for i := 1; i < len(data); i++ {
-		ema[i] = (data[i]-ema[i-1])*multiplier + ema[i-1]
-	}
-	return ema
-}
-
-// 计算 MACD
-func calculateMACD(closePrices []float64, fastPeriod, slowPeriod, signalPeriod int) (macdLine, signalLine, histogram []float64) {
-	emaFast := calculateEMA(closePrices, fastPeriod)
-	emaSlow := calculateEMA(closePrices, slowPeriod)
-	macdLine = make([]float64, len(closePrices))
-	for i := range closePrices {
-		macdLine[i] = emaFast[i] - emaSlow[i]
-	}
-	signalLine = calculateEMA(macdLine, signalPeriod)
-	histogram = make([]float64, len(closePrices))
-	for i := range closePrices {
-		histogram[i] = macdLine[i] - signalLine[i]
-	}
-	return
 }
 
 // 获取两线靠近状态描述
@@ -228,10 +209,17 @@ func processSymbol(client *futures.Client, symbol string, timeInternal string) (
 	}
 
 	currentPrice := closes[len(closes)-1]
-	ma25 := calculateMA(closes, 25)
-	ema144 := calculateEMA(closes, 144)
-	ema169 := calculateEMA(closes, 169)
-	macdLine, signalLine, histogram := calculateMACD(closes, 12, 26, 9)
+	ma25 := utils.CalculateMA(closes, 25)
+	ma100 := utils.CalculateMA(closes, 100) //4小时的MA25
+	ema144 := utils.CalculateEMA(closes, 144)
+	ema169 := utils.CalculateEMA(closes, 169)
+	macdLine, signalLine, histogram := utils.CalculateMACD(closes, 12, 26, 9)
+	//先将MA25保存
+	if timeInternal == "1h" {
+		mu_MA25Map1h.Lock()
+		MA25Map1h[symbol] = ma25
+		mu_MA25Map1h.Unlock()
+	}
 
 	//过滤条件
 	//只过滤出在EMA144和EMA169之上
@@ -239,16 +227,35 @@ func processSymbol(client *futures.Client, symbol string, timeInternal string) (
 		return CoinIndicator{}, false
 	}
 
-	//只过滤在MA25之上
-	priceToMA := currentPrice - ma25
-	if priceToMA < 0 {
+	//只过滤在MA25之上, 4小时在MA25之下进行一次标记
+	priceToMA25 := currentPrice - ma25
+	priceToMA100 := currentPrice - ma100
+	if priceToMA25 < 0 {
 		return CoinIndicator{}, false
 	}
-
-	//只过滤出红色柱子
-	currentHistogram := histogram[len(histogram)-1]
-	if currentHistogram > 0 {
+	if timeInternal == "1h" && priceToMA100 < 0 {
 		return CoinIndicator{}, false
+	}
+	//最新是红柱，或者金叉
+	currentHistogram := histogram[len(histogram)-1]
+	preHistogram := histogram[len(histogram)-2]
+	if currentHistogram > 0 {
+		if preHistogram > 0 {
+			return CoinIndicator{}, false
+		}
+	}
+
+	//计算最大止损
+	var stopLossRate float64
+	if timeInternal == "4h" {
+		ma25_1h, ok := MA25Map1h[symbol]
+		if ok && ma25_1h != 0 {
+			stopLossRate = math.Abs(currentPrice-ma25_1h) / ma25_1h * 100
+		}
+	}
+
+	if timeInternal == "1h" {
+		stopLossRate = math.Abs(currentPrice-ma25) / ma25 * 100
 	}
 
 	deaAboveZero := signalLine[len(signalLine)-1] > 0
@@ -259,9 +266,10 @@ func processSymbol(client *futures.Client, symbol string, timeInternal string) (
 	signalRate := signalLine[len(signalLine)-1] - signalLine[len(signalLine)-2]
 	crossingTrend := (macdLine[len(macdLine)-1] < signalLine[len(signalLine)-1] && macdRate > signalRate) ||
 		(macdLine[len(macdLine)-1] > signalLine[len(signalLine)-1] && macdRate < signalRate)
+	crossed := currentHistogram > 0 && preHistogram < 0
 	entangled := currentDistance/math.Abs(signalLine[len(signalLine)-1]) < 0.05
 
-	if deaAboveZero && (gettingCloser || entangled) && crossingTrend {
+	if deaAboveZero && (gettingCloser || entangled) && (crossingTrend || crossed) {
 		return CoinIndicator{
 			Symbol:       symbol,
 			Price:        currentPrice,
@@ -269,8 +277,9 @@ func processSymbol(client *futures.Client, symbol string, timeInternal string) (
 			MACD:         macdLine[len(macdLine)-1],
 			Signal:       signalLine[len(signalLine)-1],
 			Histogram:    histogram[len(histogram)-1],
-			PriceToMA:    priceToMA,
 			TimeInternal: timeInternal,
+			Volume24H:    volumeMap[symbol],
+			StopLossRate: stopLossRate,
 		}, true
 	}
 	return CoinIndicator{}, false
