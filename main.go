@@ -180,7 +180,7 @@ func getConvergingStatus(macd, signal float64) string {
 	if (macd > signal && macd-signal < 0.0005) || (signal > macd && signal-macd < 0.0005) {
 		return "即将相交"
 	} else if math.Abs(macd-signal)/math.Abs(signal) < 0.03 {
-		return "纠缠中"
+		return "正纠缠中"
 	} else {
 		return "正在靠近"
 	}
